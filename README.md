@@ -130,3 +130,45 @@ agent_recovery_harness/
 3. 做一个可注入 tool schema 错误的 demo runner
 4. 接入第一个 detector 和 fix-and-retry recovery 策略
 
+## 开发流程
+
+后续编码按这个节奏推进：
+
+1. **需求分析**：先明确要解决的问题、输入输出、边界条件和验收标准
+2. **步骤拆解**：把需求拆成可独立验证的小模块
+3. **按模块撰写代码**：先写核心路径，保持模块职责清楚
+4. **最小 MVP 实现**：优先跑通闭环，再逐步补边界能力
+5. **自检查测试**：每次改动后做语法检查、关键路径运行和必要的 smoke test
+6. **撰写文档**：更新 README 或模块说明，记录运行方式和设计选择
+
+代码约定：每个函数或类方法前写一行简短注释，说明它负责什么。
+
+## LLM Smoke Test
+
+当前第一步是调通 OpenAI-compatible LLM provider。配置入口在 `config/config.yaml`，默认使用阿里云 DashScope compatible mode：
+
+```bash
+export API_KEY_Qwen="你的 DashScope API key"
+python src/main.py
+```
+
+普通问答会保留本次会话历史，因此可以追问“刚刚我问了什么”。
+
+也可以复制 `.env.example` 为 `.env`，把 `API_KEY_Qwen` 填进去。`.env` 已经被 `.gitignore` 忽略，不会提交到仓库。
+
+Prompt 文件统一放在 `src/prompt/` 目录下。当前交互回复使用：
+
+```text
+src/prompt/reply/system.md
+```
+
+如果该文件为空，会回退到代码里的默认 system prompt。
+
+切换到本地 sglang：
+
+```bash
+export MODEL_PROVIDER=sglang
+export SGLANG_API_KEY="local"
+export SGLANG_BASE_URL="http://127.0.0.1:30000/v1"
+python src/main.py
+```
