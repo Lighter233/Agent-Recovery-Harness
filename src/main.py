@@ -2,94 +2,100 @@ from __future__ import annotations
 
 import argparse
 import sys
+import warnings
 from pathlib import Path
 
-from llm import ChatMessage, LLMClient, init_llm_client
+from langchain_core._api.deprecation import LangChainPendingDeprecationWarning
+
+warnings.filterwarnings("ignore", category=LangChainPendingDeprecationWarning)
+
+from harness import ExceptionDetector, Harness, RunResult
+from harness.llm.client import init_llm_client, load_dotenv
+from harness.runtime.config import build_run_metadata, load_config, resolve_run_root
+
+from graph import build_chat_graph
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SYSTEM_PROMPT_PATH = PROJECT_ROOT / "src" / "prompt" / "reply" / "system.md"
 
 
-# 执行一次性问答，适合脚本测试或非交互调用。
-def answer_once(client: LLMClient, query: str) -> int:
-    try:
-        answer = client.chat(query)
-    except Exception as exc:
-        print(f"LLM error: {exc}", file=sys.stderr)
-        return 1
-
-    print(answer)
-    return 0
-
-
-# 启动交互式循环，持续读取用户 query 并输出 answer。
-def chat_loop(client: LLMClient) -> int:
-    print("Agent Recovery Harness LLM chat")
-    print("输入问题开始对话；输入 exit / quit / q 退出。")
-
-    history: list[ChatMessage] = []
-
-    while True:
-        try:
-            query = input("\nquery> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return 0
-
-        if not query:
-            continue
-        if query.lower() in {"exit", "quit", "q"}:
-            return 0
-
-        print("answer> ", end="", flush=True)
-        try:
-            answer = client.chat(query, history=history)
-        except Exception as exc:
-            print(f"LLM error: {exc}", file=sys.stderr)
-            continue
-
-        print(answer)
-        history.append({"role": "user", "content": query})
-        history.append({"role": "assistant", "content": answer})
-
-
-# 解析命令行参数，初始化客户端，并选择单轮或交互模式。
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Agent Recovery Harness interactive chat.")
-    parser.add_argument(
-        "--config",
-        default=str(PROJECT_ROOT / "config" / "config.yaml"),
-        help="Path to config.yaml.",
+# CLI 参数解析
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Agent Recovery Harness chat demo",
+        epilog=(
+            "Examples:\n"
+            "  python src/main.py --query hi\n"
+            "  python src/main.py --resume <run_id> --query '刚刚我问了什么'\n"
+            "  python src/main.py --resume <run_id> --continue-run"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
-        "--dotenv",
-        default=str(PROJECT_ROOT / ".env"),
-        help="Path to local .env file.",
-    )
-    parser.add_argument(
-        "--system-prompt",
-        default=str(DEFAULT_SYSTEM_PROMPT_PATH),
-        help="Path to the reply system prompt markdown file.",
-    )
-    parser.add_argument("--query", help="Run one query and exit.")
+    parser.add_argument("--config", default=str(PROJECT_ROOT / "config" / "config.yaml"))
+    parser.add_argument("--dotenv", default=str(PROJECT_ROOT / ".env"))
+    parser.add_argument("--resume", metavar="RUN_ID")
+    parser.add_argument("--query")
+    parser.add_argument("--continue-run", action="store_true")
     args = parser.parse_args()
 
+    if args.continue_run and not args.resume:
+        parser.error("--continue-run requires --resume RUN_ID")
+    if args.continue_run and args.query:
+        parser.error("--continue-run cannot be combined with --query")
+    if not args.resume and not args.query:
+        parser.error("provide --query for a new run, or --resume RUN_ID")
+
+    return args
+
+
+# 主入口：构造 Harness，跑一次 run 或 resume
+def main() -> int:
+    args = parse_args()
+    load_dotenv(Path(args.dotenv))
     try:
-        client = init_llm_client(
-            Path(args.config),
-            Path(args.dotenv),
-            Path(args.system_prompt),
-        )
+        client = init_llm_client(Path(args.config))
+        config = load_config(Path(args.config))
     except Exception as exc:
         print(f"Config error: {exc}", file=sys.stderr)
         return 2
 
-    if args.query:
-        return answer_once(client, args.query)
+    run_root = resolve_run_root(config, PROJECT_ROOT)
+    graph = build_chat_graph(client)
 
-    return chat_loop(client)
+    with Harness(
+        graph=graph,
+        run_root=run_root,
+        detectors=[ExceptionDetector()],
+        metadata=build_run_metadata(config),
+    ) as harness:
+        if args.continue_run:
+            result = harness.resume(args.resume)
+        elif args.resume:
+            result = harness.resume(args.resume, input={"query": args.query})
+        else:
+            result = harness.run({"query": args.query})
+
+    print(f"run_id: {result.run_id}")
+    return _print_result(result)
+
+# 打印一次 run 的最终结果，返回退出码
+def _print_result(result: RunResult) -> int:
+    if result.failed:
+        if result.failure_signals:
+            print(f"Failed: {result.failure_signals[0].summary}", file=sys.stderr)
+        else:
+            print("Failed: see trace.jsonl for details", file=sys.stderr)
+        return 1
+
+    if result.output is None:
+        print("No output", file=sys.stderr)
+        return 1
+
+    answer = result.output.get("answer", "")
+    if answer:
+        print(answer)
+    return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())
